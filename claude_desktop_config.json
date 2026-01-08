@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "obspy-mcp": {
+      "command": "/Users/smazwadulalam/Desktop/Berkeley/simple-obspy/.venv/bin/python",
+      "args": ["/Users/smazwadulalam/Desktop/Berkeley/simple-obspy/server.py"]
+    }
+  }
+}
+
