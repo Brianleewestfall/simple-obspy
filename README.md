@@ -191,4 +191,4 @@ obspy_downloads/2025-12-08T14-15-10Z_II.ERM/
 
 ## Acknowledgments
 
-Developed at the request of **Weiqiang Zhu**, Earth & Planetary Science, UC Berkeley.
+Developed at the request of **Professor Weiqiang Zhu**, Earth & Planetary Science, UC Berkeley.
