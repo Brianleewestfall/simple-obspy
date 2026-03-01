@@ -1,2 +1,4 @@
 obspy
 fastmcp
+numpy
+matplotlib
