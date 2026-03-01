@@ -1,30 +1,48 @@
-# ObsPy MCP Server
+# ObsPy MCP Server — TeslaQuake Edition
 
-MCP server enabling Claude Desktop to download earthquake and waveform data via ObsPy.
+MCP server enabling Claude Desktop to download earthquake data, analyze waveform frequencies, and detect electromagnetic precursors via ObsPy.
 
-This server exposes ObsPy functionality as MCP tools, enabling Claude to:
-- Search earthquake catalogs (FDSN)
-- Find nearby seismic stations
-- Download waveforms, metadata, and plots
-- Estimate phase arrival times (TauP)
+**Forked from [Fahim-Azwad/simple-obspy](https://github.com/Fahim-Azwad/simple-obspy)** (UC Berkeley) and customized for [TeslaQuake](https://teslaquake.com) dual-frequency earthquake prediction research.
+
+## TeslaQuake Additions
+
+This fork adds spectral analysis tools for monitoring electromagnetic earthquake precursors:
+
+- **FFT Spectral Analysis** — Extract frequency peaks from any seismic waveform
+- **Dual-Frequency Monitor** — Track Schumann Resonance (7.83 Hz) + Tesla Telluric (11.78 Hz)
+- **Anomaly Detection** — Z-score based alerting with NORMAL → CRITICAL severity levels
+- **Supabase Integration** — Push findings directly to TeslaQuake's anomaly detection database
+- **Precursor Flagging** — Detect frequency shifts that may indicate impending seismic activity
+
+### Monitored Frequencies
+
+| Band | Frequency | Significance |
+|------|-----------|-------------|
+| SR₁ | 7.83 Hz | Schumann Resonance fundamental |
+| Tesla | 11.78 Hz | Tesla Telluric Frequency |
+| SR₂ | 14.3 Hz | Schumann 2nd harmonic |
+| SR₃ | 20.8 Hz | Schumann 3rd harmonic |
+| Tesla 3-6-9 | 23.5 Hz | Tesla harmonic (discovered relationship) |
+| SR₄ | 26.4 Hz | Schumann 4th harmonic |
+| SR₅ | 33.8 Hz | Schumann 5th harmonic |
+
 ## Requirements
 
 - **Python 3.9+**
-- **obspy** - Seismic data processing library
-- **fastmcp** - MCP server framework
+- **obspy** — Seismic data processing
+- **fastmcp** — MCP server framework
+- **numpy** — FFT spectral analysis
+- **matplotlib** — Spectrum visualization
 
 ## Quick Start
 
 ```bash
-# Clone the repository
-git clone https://github.com/Fahim-Azwad/simple-obspy.git
+git clone https://github.com/Brianleewestfall/simple-obspy.git
 cd simple-obspy
 
-# Create virtual environment
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-# Install dependencies
 pip install -r requirements.txt
 ```
 
@@ -35,25 +53,31 @@ Go to **Claude → Settings → Developer → Edit Config** and add:
 ```json
 {
   "mcpServers": {
-    "obspy-mcp": {
+    "obspy-teslaquake": {
       "command": "/FULL/PATH/TO/simple-obspy/.venv/bin/python",
-      "args": ["/FULL/PATH/TO/simple-obspy/server.py"]
+      "args": ["/FULL/PATH/TO/simple-obspy/server.py"],
+      "env": {
+        "TESLAQUAKE_SUPABASE_URL": "https://your-project.supabase.co",
+        "TESLAQUAKE_SUPABASE_KEY": "your-service-role-key"
+      }
     }
   }
 }
 ```
 
-> **Note:** Replace `/FULL/PATH/TO/simple-obspy` with your actual path (e.g., `/Users/Fahim-Azwad/simple-obspy`)
+> Replace paths and Supabase credentials with your actual values. Supabase env vars are optional — spectral analysis works without them.
 
-Restart Claude Desktop (Cmd+Q → reopen).
+Restart Claude Desktop after editing config.
 
 ---
 
 ## Tools
 
+### Original (from upstream)
+
 | Tool | Purpose |
 |------|---------|
-| `diagnose_environment` | Health check |
+| `diagnose_environment` | Health check (filesystem + FDSN + Supabase) |
 | `find_recent_m7` | Search earthquake catalog |
 | `get_nearby_stations` | Find stations near epicenter |
 | `download_waveforms` | Download & save seismic data |
@@ -61,96 +85,42 @@ Restart Claude Desktop (Cmd+Q → reopen).
 | `calculate_distance` | Great-circle distance |
 | `auto_download_study` | One-shot automated workflow |
 
+### TeslaQuake Additions
+
+| Tool | Purpose |
+|------|---------|
+| `spectral_analysis` | FFT on any waveform — top peaks + spectrum PNG |
+| `analyze_teslaquake_frequencies` | Dual-frequency monitor with anomaly detection |
+| `push_to_supabase` | Write anomalies + baselines to TeslaQuake DB |
+
 ---
 
-## Prompt Examples
+## TeslaQuake Workflow
 
-### 🏥 Health Check
 ```
-Run diagnose_environment
-```
-
-### 🌍 Find Earthquakes
-```
-Find recent M7+ earthquakes from the last 30 days
-```
-```
-Find M6+ earthquakes from the last 90 days, limit 10
-```
-```
-Search for large earthquakes in the past 2 months
+1. "Find M6+ earthquakes from the last 7 days"
+2. "Download waveforms from the closest station"
+3. "Run analyze_teslaquake_frequencies on the waveforms"
+4. "Push results to Supabase"
 ```
 
-### 📡 Find Stations
+Or ask Claude to chain them:
+
 ```
-Find seismic stations within 3 degrees of latitude 35.0, longitude 139.0
-```
-```
-What broadband stations are near the Japan earthquake epicenter?
-```
-```
-List stations within 500 km of 41.0, 142.0
+Find a recent M6+ earthquake, download waveforms from a nearby station,
+analyze for TeslaQuake frequencies, and push any anomalies to Supabase.
 ```
 
-### 📥 Download Waveforms
-```
-Download waveforms from station IU.MAJO for the earthquake at 2025-12-08T14:15:10Z, epicenter 41.0, 142.0
-```
-```
-Get seismic data from II.ERM for the M7.6 Japan earthquake, include 5 minutes before and 30 minutes after
-```
-```
-Download BHZ channel data from network IU, station ANMO for origin time 2025-12-08T14:15:10
-```
+### Prompt Examples — TeslaQuake Tools
 
-### ⏱️ Arrival Times
 ```
-Estimate P and S wave arrival times for an earthquake 45 degrees away at 30 km depth
-```
-```
-What are the expected phase arrivals for a teleseismic event at 80 degrees distance?
+Run spectral_analysis on ./obspy_downloads/2025-12-08/waveforms.mseed
 ```
 ```
-Calculate when P, S, and PKP waves arrive for distance 120 degrees, depth 600 km
-```
-
-### 📏 Distance
-```
-What is the distance from Tokyo (35.68, 139.65) to Los Angeles (34.05, -118.24)?
+Analyze TeslaQuake frequencies on the downloaded waveforms — check for SR and Tesla anomalies
 ```
 ```
-Calculate distance between earthquake at 41.0, 142.0 and station at 42.0, 143.0
-```
-
-### 🚀 One-Shot Automatic Study (Most Powerful)
-```
-Use auto_download_study for the last 60 days, M7+, 5 degree radius
-```
-```
-Run an automatic earthquake study: find a recent M6.5+ event, locate nearby stations, download waveforms
-```
-```
-Automatically download seismic data for any M7+ earthquake in the past 30 days
-```
-```
-Do a complete seismic study - find earthquake, pick station, download data, show me the files
-```
-```
-auto_download_study with min_magnitude 6.0, days 90, maxradius 10 degrees
-```
-
-### 🔬 Advanced Workflows
-```
-1. Find M7+ earthquakes from last 60 days
-2. For the first one, find stations within 5 degrees
-3. Download waveforms from the closest station
-4. Calculate distance and estimate P/S arrival times
-```
-```
-Find the recent Japan M7.6 earthquake, download data from station II.ERM, then tell me when the P and S waves should arrive
-```
-```
-Search for deep earthquakes (depth > 300 km) in the last 90 days, download waveforms from a nearby station
+Push the analysis results to Supabase with station IU.ANMO and context "Pre-event scan Alaska"
 ```
 
 ---
@@ -161,23 +131,24 @@ Downloads saved to `./obspy_downloads/`:
 
 ```
 obspy_downloads/2025-12-08T14-15-10Z_II.ERM/
-├── waveforms.mseed    # Seismogram data (MiniSEED)
-├── station.xml        # Instrument response (StationXML)
-├── event.json         # Earthquake parameters
-└── quickplot.png      # Waveform visualization
+├── waveforms.mseed          # Seismogram data (MiniSEED)
+├── station.xml              # Instrument response (StationXML)
+├── event.json               # Earthquake parameters
+├── quickplot.png            # Waveform visualization
+├── spectrum.png             # FFT frequency spectrum
+└── teslaquake_analysis.png  # Dual-frequency analysis + z-score chart
 ```
 
 ---
 
-## Channel Codes
+## Supabase Tables Used
 
-| Code | Meaning |
-|------|---------|
-| `BH?` | Broadband high-gain (default) |
-| `HH?` | High broadband |
-| `LH?` | Long-period |
-| `BHZ` | Broadband vertical only |
-| `BH1`, `BH2` | Horizontal components |
+| Table | Purpose |
+|-------|---------|
+| `anomaly_detections` | Frequency bands with z-score ≥ 2.0 |
+| `welford_baselines` | Running mean/variance for each frequency band |
+
+Metric names: `obspy_sr1_amplitude`, `obspy_tesla_amplitude`, `obspy_sr2_amplitude`, etc.
 
 ---
 
@@ -186,9 +157,10 @@ obspy_downloads/2025-12-08T14-15-10Z_II.ERM/
 - [ObsPy Documentation](https://docs.obspy.org/)
 - [IRIS Web Services](https://service.iris.edu/)
 - [MCP Protocol](https://modelcontextprotocol.io/)
-
----
+- [TeslaQuake Research](https://teslaquake.com)
 
 ## Acknowledgments
 
-Developed at the request of **Professor Weiqiang Zhu**, Earth & Planetary Science, UC Berkeley.
+Original server developed at the request of **Professor Weiqiang Zhu**, Earth & Planetary Science, UC Berkeley.
+
+TeslaQuake customization by **Brian Lee Westfall** — AI Vision Designs, Fort Worth, TX.
