@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import os
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -29,10 +30,67 @@ TESLAQUAKE_FREQUENCIES = {
     "tesla_369": {"freq": 23.5, "label": "Tesla 3-6-9 Harmonic", "tolerance": 0.5},
 }
 
+# Metric name mapping for Supabase (matches existing welford_baselines convention)
+METRIC_NAMES = {
+    "sr1": "obspy_sr1_amplitude",
+    "sr2": "obspy_sr2_amplitude",
+    "sr3": "obspy_sr3_amplitude",
+    "sr4": "obspy_sr4_amplitude",
+    "sr5": "obspy_sr5_amplitude",
+    "tesla": "obspy_tesla_amplitude",
+    "tesla_369": "obspy_tesla369_amplitude",
+}
+
 # Anomaly thresholds (standard deviations above baseline)
 ANOMALY_THRESHOLD_MODERATE = 2.0
 ANOMALY_THRESHOLD_HIGH = 3.0
 ANOMALY_THRESHOLD_CRITICAL = 4.0
+
+# ═══════════════════════════════════════════════════════════════
+# Supabase Configuration (env vars set in Claude Desktop or .env)
+# ═══════════════════════════════════════════════════════════════
+SUPABASE_URL = os.environ.get("TESLAQUAKE_SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("TESLAQUAKE_SUPABASE_KEY", "")
+
+
+def _supabase_headers():
+    """Build auth headers for Supabase REST API."""
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+
+
+async def _supabase_post(table: str, rows: list) -> Dict[str, Any]:
+    """Insert rows into a Supabase table via REST API (no SDK dependency)."""
+    import urllib.request
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    data = json.dumps(rows).encode("utf-8")
+    headers = _supabase_headers()
+    headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return {"ok": True, "status": resp.status, "rows_sent": len(rows)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _supabase_post_sync(table: str, rows: list) -> Dict[str, Any]:
+    """Synchronous insert into Supabase via REST API."""
+    import urllib.request
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    data = json.dumps(rows).encode("utf-8")
+    headers = _supabase_headers()
+    headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return {"ok": True, "status": resp.status, "rows_sent": len(rows)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # Helpers
@@ -178,6 +236,21 @@ def diagnose_environment(test_provider: str = "IRIS") -> Dict[str, Any]:
     except Exception as e:
         info["fdsn_ok"], info["fdsn_error"] = False, str(e)
 
+    # Check Supabase
+    info["supabase_configured"] = bool(SUPABASE_URL and SUPABASE_KEY)
+    if info["supabase_configured"]:
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                f"{SUPABASE_URL}/rest/v1/collection_health?select=id&limit=1",
+                headers=_supabase_headers()
+            )
+            with urllib.request.urlopen(req) as resp:
+                info["supabase_ok"] = resp.status == 200
+        except Exception as e:
+            info["supabase_ok"] = False
+            info["supabase_error"] = str(e)
+
     ok = info.get("writable", False) and info.get("fdsn_ok", False)
     info["status"] = "READY" if ok else "NOT READY"
     return {"ok": ok, "diagnostic": info}
@@ -229,11 +302,6 @@ def _download_waveforms_impl(network: str, station: str, latitude: float, longit
                               magnitude: float = None, depth_km: float = None, location: str = "*", channel: str = "BH?",
                               pre_seconds: int = 120, post_seconds: int = 1200, output_dir: str = "", make_plot: bool = True) -> Dict[str, Any]:
     # Core download logic
-    # Saves:
-    # 1. waveforms.mseed  : Raw seismogram data
-    # 2. station.xml      : Instrument response metadata
-    # 3. event.json       : Earthquake parameters
-    # 4. quickplot.png    : Waveform visualization
     try:
         if not origin_time_utc:
             return {"ok": False, "error": "origin_time_utc is required"}
@@ -247,23 +315,23 @@ def _download_waveforms_impl(network: str, station: str, latitude: float, longit
         folder = base / f"{safe_folder_name(str(t0))}_{network}.{station}"
         folder.mkdir(parents=True, exist_ok=True)
 
-        # Fetch waveforms (time window: origin ± pre/post seconds)
+        # Fetch waveforms
         st = client.get_waveforms(network, station, location, channel, t0 - pre_seconds, t0 + post_seconds)
         if len(st) == 0:
             return {"ok": False, "error": "No waveform data returned"}
 
-        # Fetch station metadata (optional, for instrument response)
+        # Fetch station metadata
         inv = None
         try:
             inv = client.get_stations(network=network, station=station, location=location, channel=channel, level="response")
         except:
             pass
 
-        # Save waveforms (MiniSEED format)
+        # Save waveforms (MiniSEED)
         mseed_path = folder / "waveforms.mseed"
         st.write(str(mseed_path), format="MSEED")
 
-        # Save station metadata (StationXML format)
+        # Save station metadata (StationXML)
         stationxml_path = None
         if inv:
             stationxml_path = folder / "station.xml"
@@ -286,7 +354,7 @@ def _download_waveforms_impl(network: str, station: str, latitude: float, longit
             except:
                 pass
 
-        # Build response with trace info
+        # Build response
         traces = [{"id": tr.id, "starttime": str(tr.stats.starttime), "endtime": str(tr.stats.endtime),
                    "sampling_rate": float(tr.stats.sampling_rate), "npts": int(tr.stats.npts)} for tr in st]
 
@@ -308,13 +376,6 @@ def download_waveforms(network: str, station: str, latitude: float, longitude: f
                        magnitude: float = None, depth_km: float = None, location: str = "*", channel: str = "BH?",
                        pre_seconds: int = 120, post_seconds: int = 1200, output_dir: str = "", make_plot: bool = True) -> Dict[str, Any]:
     # Download waveforms for an earthquake and save to disk
-    #
-    # Parameters:
-    #     network, station: e.g., "IU", "ANMO"
-    #     latitude, longitude: Earthquake epicenter
-    #     origin_time_utc: e.g., "2025-12-01T12:34:56"
-    #     pre_seconds: Time before origin (default: 2 min)
-    #     post_seconds: Time after origin (default: 20 min)
     return _download_waveforms_impl(network=network, station=station, latitude=latitude, longitude=longitude,
                                      origin_time_utc=origin_time_utc, magnitude=magnitude, depth_km=depth_km,
                                      location=location, channel=channel, pre_seconds=pre_seconds,
@@ -328,19 +389,7 @@ def download_waveforms(network: str, station: str, latitude: float, longitude: f
 def spectral_analysis(mseed_path: str, freq_min: float = 0.1, freq_max: float = 50.0,
                       num_peaks: int = 10, trace_index: int = 0,
                       save_plot: bool = True) -> Dict[str, Any]:
-    """Perform FFT spectral analysis on a downloaded waveform file.
-    
-    Parameters:
-        mseed_path: Path to .mseed waveform file
-        freq_min: Minimum frequency to analyze (Hz)
-        freq_max: Maximum frequency to analyze (Hz)
-        num_peaks: Number of top frequency peaks to return
-        trace_index: Which trace to analyze (0 = first)
-        save_plot: Save a frequency spectrum PNG
-    
-    Returns:
-        Top frequency peaks, spectral statistics, and optional plot path
-    """
+    """Perform FFT spectral analysis on a downloaded waveform file."""
     try:
         st = read(mseed_path)
         if trace_index >= len(st):
@@ -350,22 +399,15 @@ def spectral_analysis(mseed_path: str, freq_min: float = 0.1, freq_max: float = 
         data = tr.data.astype(float)
         sr = tr.stats.sampling_rate
         
-        # Nyquist check
         nyquist = sr / 2.0
         if freq_max > nyquist:
             freq_max = nyquist * 0.95
         
-        # Compute FFT
         freqs, amps = _compute_fft(data, sr, freq_min, freq_max)
-        
-        # Find peaks
         peaks = _find_peaks(freqs, amps, num_peaks)
         
-        # Stats
         stats = {
-            "trace_id": tr.id,
-            "sampling_rate": float(sr),
-            "nyquist_freq": float(nyquist),
+            "trace_id": tr.id, "sampling_rate": float(sr), "nyquist_freq": float(nyquist),
             "duration_seconds": float(tr.stats.npts / sr),
             "freq_resolution": round(float(sr / tr.stats.npts), 4),
             "analyzed_band": [freq_min, freq_max],
@@ -374,7 +416,6 @@ def spectral_analysis(mseed_path: str, freq_min: float = 0.1, freq_max: float = 
             "dominant_freq": peaks[0]["freq_hz"] if peaks else None,
         }
         
-        # Save spectrum plot
         plot_path = None
         if save_plot:
             try:
@@ -385,7 +426,6 @@ def spectral_analysis(mseed_path: str, freq_min: float = 0.1, freq_max: float = 
                 fig, ax = plt.subplots(figsize=(12, 5))
                 ax.semilogy(freqs, amps, color="#3498DB", linewidth=0.8, alpha=0.9)
                 
-                # Mark TeslaQuake frequencies
                 colors = {"sr1": "#C49A3C", "sr2": "#C49A3C", "sr3": "#C49A3C",
                           "sr4": "#C49A3C", "sr5": "#C49A3C",
                           "tesla": "#FF4444", "tesla_369": "#FF8800"}
@@ -410,12 +450,7 @@ def spectral_analysis(mseed_path: str, freq_min: float = 0.1, freq_max: float = 
             except Exception as e:
                 plot_path = f"plot_error: {e}"
         
-        return {
-            "ok": True,
-            "peaks": peaks,
-            "stats": stats,
-            "spectrum_plot": plot_path,
-        }
+        return {"ok": True, "peaks": peaks, "stats": stats, "spectrum_plot": plot_path}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -426,25 +461,7 @@ def spectral_analysis(mseed_path: str, freq_min: float = 0.1, freq_max: float = 
 @mcp.tool
 def analyze_teslaquake_frequencies(mseed_path: str, trace_index: int = 0,
                                     save_plot: bool = True) -> Dict[str, Any]:
-    """Analyze waveform for TeslaQuake signature frequencies.
-    
-    Monitors:
-        - 7.83 Hz  : Schumann Resonance fundamental (SR₁)
-        - 11.78 Hz : Tesla Telluric Frequency
-        - 14.3 Hz  : SR₂
-        - 20.8 Hz  : SR₃
-        - 23.5 Hz  : Tesla 3-6-9 Harmonic
-        - 26.4 Hz  : SR₄
-        - 33.8 Hz  : SR₅
-    
-    Returns amplitude, z-score, and anomaly status for each frequency.
-    Frequency shifts from expected values may indicate precursor activity.
-    
-    Parameters:
-        mseed_path: Path to .mseed waveform file
-        trace_index: Which trace to analyze (0 = first)
-        save_plot: Save annotated spectrum PNG with TeslaQuake bands highlighted
-    """
+    """Analyze waveform for TeslaQuake signature frequencies (7.83 Hz SR₁ + 11.78 Hz Tesla)."""
     try:
         st = read(mseed_path)
         if trace_index >= len(st):
@@ -454,17 +471,12 @@ def analyze_teslaquake_frequencies(mseed_path: str, trace_index: int = 0,
         data = tr.data.astype(float)
         sr = tr.stats.sampling_rate
         
-        # Need at least 40 Hz sampling to see all SR harmonics
         nyquist = sr / 2.0
         freq_max = min(40.0, nyquist * 0.95)
         
-        # Compute FFT
         freqs, amps = _compute_fft(data, sr, 1.0, freq_max)
-        
-        # Analyze TeslaQuake bands
         band_results, baseline_stats = _check_teslaquake_bands(freqs, amps)
         
-        # Overall anomaly assessment
         anomalies = [k for k, v in band_results.items() if v["status"] in ("HIGH", "CRITICAL")]
         moderate = [k for k, v in band_results.items() if v["status"] == "MODERATE"]
         
@@ -478,7 +490,6 @@ def analyze_teslaquake_frequencies(mseed_path: str, trace_index: int = 0,
             overall = "✅ NORMAL"
             alert_level = "NORMAL"
         
-        # Check for frequency shifts (precursor indicator)
         sr1_shift = band_results.get("sr1", {}).get("freq_shift")
         tesla_shift = band_results.get("tesla", {}).get("freq_shift")
         precursor_flags = []
@@ -487,7 +498,6 @@ def analyze_teslaquake_frequencies(mseed_path: str, trace_index: int = 0,
         if tesla_shift is not None and abs(tesla_shift) > 0.15:
             precursor_flags.append(f"Tesla shifted {tesla_shift:+.3f} Hz from 11.78 Hz baseline")
         
-        # Save annotated plot
         plot_path = None
         if save_plot:
             try:
@@ -498,7 +508,6 @@ def analyze_teslaquake_frequencies(mseed_path: str, trace_index: int = 0,
                 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), gridspec_kw={"height_ratios": [3, 1]})
                 fig.patch.set_facecolor("#111214")
                 
-                # Top: Full spectrum with TeslaQuake bands
                 ax1.semilogy(freqs, amps, color="#3498DB", linewidth=0.8, alpha=0.9)
                 
                 status_colors = {"NORMAL": "#2ECC71", "MODERATE": "#F39C12",
@@ -521,7 +530,6 @@ def analyze_teslaquake_frequencies(mseed_path: str, trace_index: int = 0,
                 ax1.set_facecolor("#1A1A2E")
                 ax1.tick_params(colors="#9CA3AF")
                 
-                # Bottom: Bar chart of z-scores per band
                 band_names = [v["label"].replace("Schumann Resonance ", "")
                               for v in band_results.values() if v["target_freq"] <= freq_max]
                 z_scores = [v["z_score"] for v in band_results.values() if v["target_freq"] <= freq_max]
@@ -546,31 +554,126 @@ def analyze_teslaquake_frequencies(mseed_path: str, trace_index: int = 0,
                 plot_path = f"plot_error: {e}"
         
         return {
-            "ok": True,
-            "overall_status": overall,
-            "alert_level": alert_level,
-            "trace_id": tr.id,
-            "sampling_rate": float(sr),
+            "ok": True, "overall_status": overall, "alert_level": alert_level,
+            "trace_id": tr.id, "sampling_rate": float(sr),
             "duration_seconds": float(tr.stats.npts / sr),
-            "frequencies": band_results,
-            "baseline": baseline_stats,
-            "anomalies": anomalies,
-            "precursor_flags": precursor_flags,
+            "frequencies": band_results, "baseline": baseline_stats,
+            "anomalies": anomalies, "precursor_flags": precursor_flags,
             "teslaquake_plot": plot_path,
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
+# ═══════════════════════════════════════════════════════════════
+# Tool: Push Analysis Results to Supabase
+# ═══════════════════════════════════════════════════════════════
+@mcp.tool
+def push_to_supabase(analysis_result: Dict[str, Any], source_station: str = "",
+                     event_context: str = "") -> Dict[str, Any]:
+    """Push TeslaQuake frequency analysis results to Supabase.
+    
+    Writes to two tables:
+        1. anomaly_detections — any frequency band with z-score >= 2.0
+        2. welford_baselines — updates streaming mean/variance for each band
+    
+    Parameters:
+        analysis_result: Output from analyze_teslaquake_frequencies()
+        source_station: e.g. "IU.ANMO" for provenance tracking
+        event_context: Optional description e.g. "Pre-event scan M6.2 Chile"
+    
+    Requires env vars: TESLAQUAKE_SUPABASE_URL, TESLAQUAKE_SUPABASE_KEY
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return {"ok": False, "error": "Supabase not configured. Set TESLAQUAKE_SUPABASE_URL and TESLAQUAKE_SUPABASE_KEY env vars."}
+    
+    if not analysis_result.get("ok"):
+        return {"ok": False, "error": "Cannot push failed analysis result"}
+    
+    frequencies = analysis_result.get("frequencies", {})
+    baseline = analysis_result.get("baseline", {})
+    now_iso = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    
+    # 1. Build anomaly_detections rows (only for z >= MODERATE threshold)
+    anomaly_rows = []
+    for key, result in frequencies.items():
+        if result.get("z_score", 0) >= ANOMALY_THRESHOLD_MODERATE:
+            metric = METRIC_NAMES.get(key, f"obspy_{key}_amplitude")
+            desc_parts = [f"{result['label']}: z={result['z_score']}"]
+            if result.get("freq_shift") is not None:
+                desc_parts.append(f"shift={result['freq_shift']:+.3f} Hz")
+            if source_station:
+                desc_parts.append(f"station={source_station}")
+            if event_context:
+                desc_parts.append(event_context)
+            
+            anomaly_rows.append({
+                "metric_name": metric,
+                "observed_value": result["amplitude"],
+                "baseline_mean": baseline.get("mean", 0),
+                "baseline_std": baseline.get("std", 0),
+                "z_score": result["z_score"],
+                "severity": result["status"],
+                "baseline_count": 0,  # ObsPy single-window analysis
+                "weekday": now_dt.weekday(),
+                "month": now_dt.month,
+                "description": " | ".join(desc_parts),
+                "detected_at": now_iso,
+                "acknowledged": False,
+                "detection_method": "obspy_fft",
+            })
+    
+    # 2. Build welford_baselines update rows (all bands, for running stats)
+    baseline_rows = []
+    for key, result in frequencies.items():
+        if result.get("amplitude", 0) > 0 and result.get("status") != "NO_DATA":
+            metric = METRIC_NAMES.get(key, f"obspy_{key}_amplitude")
+            baseline_rows.append({
+                "metric_name": metric,
+                "weekday": now_dt.weekday(),
+                "month": now_dt.month,
+                "count": 1,
+                "mean": result["amplitude"],
+                "m2": 0.0,
+                "variance": 0.0,
+                "std_dev": 0.0,
+                "min_value": result["amplitude"],
+                "max_value": result["amplitude"],
+                "last_value": result["amplitude"],
+                "last_updated": now_iso,
+            })
+    
+    results = {"anomalies_sent": 0, "baselines_sent": 0, "errors": []}
+    
+    # Push anomalies
+    if anomaly_rows:
+        res = _supabase_post_sync("anomaly_detections", anomaly_rows)
+        if res["ok"]:
+            results["anomalies_sent"] = len(anomaly_rows)
+        else:
+            results["errors"].append(f"anomaly_detections: {res['error']}")
+    
+    # Push baselines (upsert)
+    if baseline_rows:
+        res = _supabase_post_sync("welford_baselines", baseline_rows)
+        if res["ok"]:
+            results["baselines_sent"] = len(baseline_rows)
+        else:
+            results["errors"].append(f"welford_baselines: {res['error']}")
+    
+    results["ok"] = len(results["errors"]) == 0
+    results["summary"] = (
+        f"Pushed {results['anomalies_sent']} anomalies + "
+        f"{results['baselines_sent']} baseline updates to Supabase"
+    )
+    return results
+
+
 # Tool: Arrival Times
 @mcp.tool
 def estimate_arrival_times(distance_deg: float, depth_km: float = 10.0, phases: List[str] = None) -> Dict[str, Any]:
     # Calculate seismic phase arrival times using TauP (IASP91 Earth model)
-    #
-    # Common phases:
-    # - P, S: Direct body waves
-    # - pP, sS: Surface reflections
-    # - PKP, SKS: Core phases (teleseismic)
     try:
         if phases is None:
             phases = ["p", "s", "P", "S", "Pn", "Sn"] if distance_deg < 10 else ["P", "S", "pP", "sS", "PP", "SS", "PKP", "SKS"]
@@ -587,7 +690,6 @@ def estimate_arrival_times(distance_deg: float, depth_km: float = 10.0, phases: 
 @mcp.tool
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> Dict[str, Any]:
     # Great-circle distance between two points
-    # Returns: distance_km, distance_deg, azimuth, back_azimuth
     try:
         from obspy.geodetics import gps2dist_azimuth, kilometers2degrees
         dist_m, az, baz = gps2dist_azimuth(lat1, lon1, lat2, lon2)
@@ -601,19 +703,12 @@ def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> Di
 @mcp.tool
 def auto_download_study(days: int = 30, min_magnitude: float = 7.0, maxradius_deg: float = 2.0, channel: str = "BH?",
                         pre_seconds: int = 120, post_seconds: int = 1200, output_dir: str = "") -> Dict[str, Any]:
-    # Complete automated workflow:
-    # 1. Find recent earthquake (M7+ by default)
-    # 2. Locate nearby seismic station
-    # 3. Download waveforms + metadata
-    # 4. Save all files to disk
-    #
-    # Returns event info, station used, and proof of saved files
+    # Complete automated workflow: find quake → find station → download → analyze
     try:
         client = _fdsn()
         output_dir = output_dir or str(default_data_dir())
         end = UTCDateTime()
         
-        # Step 1: Find earthquake
         cat = client.get_events(starttime=end - (days * 86400), endtime=end, minmagnitude=min_magnitude, limit=10)
         
         chosen = None
@@ -635,7 +730,6 @@ def auto_download_study(days: int = 30, min_magnitude: float = 7.0, maxradius_de
         event_info = {"time_utc": origin_time, "latitude": ev_lat, "longitude": ev_lon,
                       "magnitude": magnitude, "magnitude_type": getattr(mag, "magnitude_type", None), "depth_km": depth_km}
 
-        # Step 2: Find nearby station
         inv = client.get_stations(latitude=ev_lat, longitude=ev_lon, maxradius=maxradius_deg, channel=channel, level="station")
         stations = [(net.code, sta.code, float(sta.latitude), float(sta.longitude)) for net in inv for sta in net]
         
@@ -645,13 +739,11 @@ def auto_download_study(days: int = 30, min_magnitude: float = 7.0, maxradius_de
         net, sta, st_lat, st_lon = stations[0]
         station_info = {"network": net, "station": sta, "latitude": st_lat, "longitude": st_lon}
 
-        # Step 3: Download waveforms
         result = _download_waveforms_impl(network=net, station=sta, latitude=ev_lat, longitude=ev_lon,
                                            origin_time_utc=origin_time, magnitude=magnitude, depth_km=depth_km,
                                            channel=channel, pre_seconds=pre_seconds, post_seconds=post_seconds,
                                            output_dir=output_dir, make_plot=True)
         
-        # Add context
         result["event"] = event_info
         result["station_chosen"] = station_info
         result["stations_available"] = len(stations)
