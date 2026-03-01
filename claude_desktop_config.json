@@ -1,9 +1,12 @@
 {
   "mcpServers": {
-    "obspy-mcp": {
-      "command": "/Users/smazwadulalam/Desktop/Berkeley/simple-obspy/.venv/bin/python",
-      "args": ["/Users/smazwadulalam/Desktop/Berkeley/simple-obspy/server.py"]
+    "obspy-teslaquake": {
+      "command": "/FULL/PATH/TO/simple-obspy/.venv/bin/python",
+      "args": ["/FULL/PATH/TO/simple-obspy/server.py"],
+      "env": {
+        "TESLAQUAKE_SUPABASE_URL": "https://your-project.supabase.co",
+        "TESLAQUAKE_SUPABASE_KEY": "your-service-role-key"
+      }
     }
   }
 }
-
